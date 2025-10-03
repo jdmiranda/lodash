@@ -473,6 +473,20 @@
   /*--------------------------------------------------------------------------*/
 
   /**
+   * Performance optimization caches
+   */
+
+  // Path parsing cache for get/set operations (LRU with max 1000 entries)
+  var pathCache = {};
+  var pathCacheKeys = [];
+  var PATH_CACHE_SIZE = 1000;
+
+  // WeakMap for tracking circular references in cloneDeep
+  var cloneCircularCache = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+
+  /*--------------------------------------------------------------------------*/
+
+  /**
    * A faster alternative to `Function#apply`, this function invokes `func`
    * with the `this` binding of `thisArg` and the arguments of `args`.
    *
@@ -591,12 +605,23 @@
         resIndex = 0,
         result = [];
 
+    // Pre-allocate for small arrays
+    if (length > 0 && length < LARGE_ARRAY_SIZE) {
+      result.length = length;
+    }
+
     while (++index < length) {
       var value = array[index];
       if (predicate(value, index, array)) {
         result[resIndex++] = value;
       }
     }
+
+    // Trim result array if we pre-allocated
+    if (result.length !== resIndex) {
+      result.length = resIndex;
+    }
+
     return result;
   }
 
@@ -648,6 +673,15 @@
     var index = -1,
         length = array == null ? 0 : array.length,
         result = Array(length);
+
+    // Fast path for small arrays (unrolled loop)
+    if (length <= 4) {
+      if (length >= 1) result[0] = iteratee(array[0], 0, array);
+      if (length >= 2) result[1] = iteratee(array[1], 1, array);
+      if (length >= 3) result[2] = iteratee(array[2], 2, array);
+      if (length === 4) result[3] = iteratee(array[3], 3, array);
+      return result;
+    }
 
     while (++index < length) {
       result[index] = iteratee(array[index], index, array);
@@ -3073,6 +3107,18 @@
       var index = 0,
           length = path.length;
 
+      // Fast path for single-level access
+      if (length === 1) {
+        return object == null ? undefined : object[toKey(path[0])];
+      }
+
+      // Fast path for two-level access
+      if (length === 2) {
+        return object == null ? undefined :
+               (object = object[toKey(path[0])]) == null ? undefined :
+               object[toKey(path[1])];
+      }
+
       while (object != null && index < length) {
         object = object[toKey(path[index++])];
       }
@@ -4518,6 +4564,27 @@
       if (isArray(value)) {
         return value;
       }
+
+      // Use path cache for string paths, but only when isKey check is independent of object
+      if (typeof value === 'string' && !isKey(value, object)) {
+        var cached = pathCache[value];
+        if (cached !== undefined) {
+          return cached;
+        }
+
+        var result = stringToPath(value);
+
+        // Add to cache with LRU eviction
+        if (pathCacheKeys.length >= PATH_CACHE_SIZE) {
+          var oldestKey = pathCacheKeys.shift();
+          delete pathCache[oldestKey];
+        }
+        pathCache[value] = result;
+        pathCacheKeys.push(value);
+
+        return result;
+      }
+
       return isKey(value, object) ? [value] : stringToPath(toString(value));
     }
 
