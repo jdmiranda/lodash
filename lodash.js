@@ -3681,12 +3681,56 @@
      * @param {Object} [stack] Tracks traversed source values and their merged
      *  counterparts.
      */
+    // Optimization: Cache for merge results
+    var mergeCache = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+    var descriptorCache = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+
     function baseMerge(object, source, srcIndex, customizer, stack) {
       if (object === source) {
         return;
       }
-      baseFor(source, function(srcValue, key) {
-        stack || (stack = new Stack);
+
+      // Fast path: Check cache for previously merged object pairs
+      if (mergeCache && !customizer) {
+        var cached = mergeCache.get(source);
+        if (cached && cached.object === object) {
+          return;
+        }
+      }
+
+      // Fast path: Simple object merge without deep traversal
+      var sourceKeys = keysIn(source);
+      var length = sourceKeys.length;
+      var hasObjects = false;
+
+      // First pass: identify if we need deep merge
+      for (var i = 0; i < length; i++) {
+        var key = sourceKeys[i];
+        var srcValue = source[key];
+        if (isObject(srcValue)) {
+          hasObjects = true;
+          break;
+        }
+      }
+
+      // Fast path: No nested objects, simple assignment
+      if (!hasObjects && !customizer) {
+        for (var i = 0; i < length; i++) {
+          var key = sourceKeys[i];
+          assignMergeValue(object, key, source[key]);
+        }
+        if (mergeCache) {
+          mergeCache.set(source, { object: object });
+        }
+        return;
+      }
+
+      // Standard merge with optimized loop
+      stack || (stack = new Stack);
+      for (var i = 0; i < length; i++) {
+        var key = sourceKeys[i];
+        var srcValue = source[key];
+
         if (isObject(srcValue)) {
           baseMergeDeep(object, source, key, srcIndex, baseMerge, customizer, stack);
         }
@@ -3700,7 +3744,11 @@
           }
           assignMergeValue(object, key, newValue);
         }
-      }, keysIn);
+      }
+
+      if (mergeCache && !customizer) {
+        mergeCache.set(source, { object: object });
+      }
     }
 
     /**
@@ -3727,6 +3775,19 @@
         assignMergeValue(object, key, stacked);
         return;
       }
+
+      // Optimization: Cache property descriptors for faster access
+      var descriptor;
+      if (descriptorCache && isObject(srcValue)) {
+        descriptor = descriptorCache.get(srcValue);
+        if (!descriptor && typeof Object.getOwnPropertyDescriptor === 'function') {
+          descriptor = Object.getOwnPropertyDescriptor(source, key);
+          if (descriptor) {
+            descriptorCache.set(srcValue, descriptor);
+          }
+        }
+      }
+
       var newValue = customizer
         ? customizer(objValue, srcValue, (key + ''), object, source, stack)
         : undefined;
@@ -3734,9 +3795,17 @@
       var isCommon = newValue === undefined;
 
       if (isCommon) {
-        var isArr = isArray(srcValue),
-            isBuff = !isArr && isBuffer(srcValue),
-            isTyped = !isArr && !isBuff && isTypedArray(srcValue);
+        // Optimization: Combine type checks to reduce function calls
+        var isArr = isArray(srcValue);
+        var isBuff = false;
+        var isTyped = false;
+
+        if (!isArr) {
+          isBuff = isBuffer(srcValue);
+          if (!isBuff) {
+            isTyped = isTypedArray(srcValue);
+          }
+        }
 
         newValue = srcValue;
         if (isArr || isBuff || isTyped) {
